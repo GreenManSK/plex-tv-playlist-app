@@ -24,8 +24,44 @@ function run_py_logged(string $script, array $args = [], string $logfile = null)
 
     if (is_resource($process)) {
         fclose($pipes[0]);
-        $stdout = stream_get_contents($pipes[1]); fclose($pipes[1]);
-        $stderr = stream_get_contents($pipes[2]); fclose($pipes[2]);
+        stream_set_blocking($pipes[1], false);
+        stream_set_blocking($pipes[2], false);
+
+        $stdout = '';
+        $stderr = '';
+        if ($logfile) {
+            @file_put_contents($logfile, "=== CMD ===\n$cmd\n\n=== LIVE OUTPUT ===\n");
+        }
+
+        while (!feof($pipes[1]) || !feof($pipes[2])) {
+            $read = [];
+            if (!feof($pipes[1])) { $read[] = $pipes[1]; }
+            if (!feof($pipes[2])) { $read[] = $pipes[2]; }
+            if (!$read) { break; }
+
+            $write = null;
+            $except = null;
+            $selected = stream_select($read, $write, $except, 1);
+            if ($selected === false) { break; }
+
+            foreach ($read as $stream) {
+                $chunk = stream_get_contents($stream);
+                if ($chunk === false || $chunk === '') { continue; }
+
+                if ($stream === $pipes[1]) {
+                    $stdout .= $chunk;
+                } else {
+                    $stderr .= $chunk;
+                }
+                if ($logfile) {
+                    @file_put_contents($logfile, $chunk, FILE_APPEND);
+                }
+                @file_put_contents('php://stderr', $chunk);
+            }
+        }
+
+        fclose($pipes[1]);
+        fclose($pipes[2]);
         $exit = proc_close($process);
 
         $result['exit_code'] = $exit;

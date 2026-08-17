@@ -106,7 +106,7 @@ try:
     cur.execute("""
         SELECT ratingKey
         FROM playlistEpisodes
-        ORDER BY timeSlot, show_id, season, episode
+        ORDER BY timeSlot, slotPriority, show_id, season, episode
         LIMIT 1
     """)
     row = cur.fetchone()

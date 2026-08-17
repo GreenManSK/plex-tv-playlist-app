@@ -10,7 +10,10 @@ This runs entirely in **Docker** and includes a web UI, Python logic, and a guid
 
 1) Download the app (clone or ZIP), open a terminal in the project folder, then:
 
+    cp .env.example .env
     docker compose up -d
+
+   On Windows PowerShell, use `Copy-Item .env.example .env` instead.
 
 2) Open your browser at:
 
@@ -65,7 +68,10 @@ Choose one:
 
 From the project folder:
 
+    cp .env.example .env
     docker compose up -d
+
+On Windows PowerShell, use `Copy-Item .env.example .env` for the first command.
 
 This builds and starts a single container. When it’s ready, open:
 
@@ -85,8 +91,9 @@ You’ll see the web UI.
    - The app tests connectivity and writes `PLEX_URL`, `PLEX_TOKEN`, and `PLEX_VERIFY_SSL` for you.
 4) Click **Initialize / Refresh TV Shows** to sync your TV libraries.
 5) Go to **Edit Shows** and select the shows you want included.
-6) Go to **Timeslots**, assign each show a unique slot (1..N), and click **Generate Playlist**.
+6) Go to **Timeslots**, assign each show a slot (1..N) and a priority within that slot, and click **Generate Playlist**.
    - The app creates (or clears) the target playlist and fills it in round‑robin order.
+   - Multiple shows may share a slot: the one with the lower priority plays all of its episodes first, then the next.
 
 That’s it. Open Plex → Playlists to see it.
 
@@ -188,7 +195,7 @@ If you used a ZIP:
 - If your Plex uses a self‑signed cert, uncheck “Verify SSL” in the wizard when saving.
 
 **Playlist didn’t fill?**
-- Ensure you selected shows and assigned **unique** timeslots before generating.
+- Ensure you selected shows and assigned timeslots before generating. Shows sharing a slot need **distinct** priorities.
 - Re-run **Initialize / Refresh TV Shows** if you recently added libraries.
 
 **Advanced: token/URL mismatches**
@@ -205,13 +212,13 @@ If you used a ZIP:
 1. Setup wizard logs into Plex (PIN), discovers your servers, and saves the correct **server token** to `.env`.
 2. You choose TV libraries and shows (via the UI).
 3. Scripts populate the database and create an empty playlist.
-4. Episodes are added in **round‑robin** order by timeslot.
+4. Episodes are added in **round‑robin** order by timeslot. Shows sharing a timeslot are chained by `slotPriority`.
 
 Schema created on first run:
 
 - `allShows(id, title, total_episodes)`
-- `playlistShows(id, title, total_episodes, timeSlot)`
-- `playlistEpisodes(ratingKey, season, episode, releaseDate, duration, summary, watchedStatus, title, episodeTitle, show_id, timeSlot)`
+- `playlistShows(id, title, total_episodes, timeSlot, slotPriority)`
+- `playlistEpisodes(ratingKey, season, episode, releaseDate, duration, summary, watchedStatus, title, episodeTitle, show_id, timeSlot, slotPriority)`
 
 ---
 

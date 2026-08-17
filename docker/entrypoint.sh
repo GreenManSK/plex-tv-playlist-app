@@ -29,5 +29,11 @@ mkdir -p "$APP_ROOT/database" "$APP_ROOT/logs"
 chown -R www-data:www-data "$APP_ROOT/database" "$APP_ROOT/logs" || true
 chmod -R u+rwX,g+rwX "$APP_ROOT/database" "$APP_ROOT/logs" || true
 
-# 4) Hand off to the base image’s default CMD
+# 4) Apply DB schema migrations (adds any new columns to existing databases)
+if [ -x "${PYTHON_EXEC:-/usr/local/bin/python3}" ]; then
+  su -s /bin/bash -c "${PYTHON_EXEC:-/usr/local/bin/python3} $APP_ROOT/scripts/db_migrate.py" www-data \
+    || echo "[entrypoint] WARN: db_migrate.py failed"
+fi
+
+# 5) Hand off to the base image’s default CMD
 exec apache2-foreground

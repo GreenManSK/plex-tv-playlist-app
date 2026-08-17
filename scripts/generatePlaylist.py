@@ -8,6 +8,7 @@ Usage:
 Purpose:
   Clears the specified Plex playlist and re-populates it in a round-robin order
   using episodes stored in SQLite (table: playlistEpisodes), grouped by timeSlot.
+  Shows sharing a timeSlot play back-to-back, ordered by slotPriority.
 
 Environment:
   - .env in project root with:
@@ -32,6 +33,7 @@ import os
 import sys
 import sqlite3
 import argparse
+import time
 from typing import Dict, List, Iterable
 from urllib.parse import urlparse, urlunparse
 
@@ -89,6 +91,23 @@ playlist_rating_key: int = args.ratingKey
 # ---------------------------
 # Helpers
 # ---------------------------
+started_at = time.monotonic()
+
+def format_duration(seconds: float) -> str:
+    """Format an elapsed duration for progress messages."""
+    minutes, remaining_seconds = divmod(max(0, int(seconds)), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m {remaining_seconds}s"
+    if minutes:
+        return f"{minutes}m {remaining_seconds}s"
+    return f"{remaining_seconds}s"
+
+def log(message: str, level: str = "INFO") -> None:
+    """Write an immediately visible, timestamped progress message."""
+    elapsed = format_duration(time.monotonic() - started_at)
+    print(f"[{level}] [+{elapsed}] {message}", flush=True)
+
 def round_robin(grouped: Dict[int, List[int]]) -> List[int]:
     """
     Interleave lists by index to produce a round-robin order.
@@ -114,6 +133,8 @@ def chunked(iterable: List, size: int) -> Iterable[List]:
 # ---------------------------
 # Connect to Plex (requests.Session controls SSL verify)
 # ---------------------------
+stage_started_at = time.monotonic()
+log(f"Connecting to Plex at {PLEX_URL}.")
 try:
     session = requests.Session()
     session.verify = True if PLEX_VERIFY_SSL else False
@@ -121,17 +142,23 @@ try:
 except Exception as e:
     print(f"[ERROR] Failed to connect to Plex at {PLEX_URL}: {e}", file=sys.stderr)
     sys.exit(3)
+log(f"Connected to Plex in {format_duration(time.monotonic() - stage_started_at)}.")
 
 # ---------------------------
 # Fetch playlist by ratingKey
 # ---------------------------
 try:
+    stage_started_at = time.monotonic()
+    log(f"Fetching target playlist ratingKey={playlist_rating_key}.")
     item = plex.fetchItem(playlist_rating_key)
     if not isinstance(item, Playlist):
         print("[ERROR] The fetched item is not a Playlist. Check the ratingKey.", file=sys.stderr)
         sys.exit(4)
     playlist: Playlist = item
-    print(f"[INFO] Target playlist: '{playlist.title}' (ratingKey={playlist_rating_key})")
+    log(
+        f"Fetched target playlist '{playlist.title}' in "
+        f"{format_duration(time.monotonic() - stage_started_at)}."
+    )
 except Exception as e:
     print(f"[ERROR] Could not fetch playlist with ratingKey {playlist_rating_key}: {e}", file=sys.stderr)
     sys.exit(4)
@@ -151,10 +178,12 @@ except Exception as e:
     sys.exit(5)
 
 try:
+    stage_started_at = time.monotonic()
+    log("Reading episode order from the database.")
     query = """
     SELECT ratingKey, timeSlot
     FROM playlistEpisodes
-    ORDER BY timeSlot, show_id, season, episode
+    ORDER BY timeSlot, COALESCE(slotPriority, 1), show_id, season, episode
     """
     cur.execute(query)
     rows = cur.fetchall()
@@ -177,18 +206,27 @@ for rating_key, slot in rows:
 
 # Produce round-robin order
 episode_order: List[int] = round_robin(episodes_by_slot)
-print(f"[INFO] Episodes to add (count): {len(episode_order)}")
+log(
+    f"Prepared {len(episode_order)} episodes across {len(episodes_by_slot)} timeslots in "
+    f"{format_duration(time.monotonic() - stage_started_at)}."
+)
 
 # ---------------------------
 # Clear existing items
 # ---------------------------
 try:
+    stage_started_at = time.monotonic()
+    log("Reading the existing playlist contents.")
     current_items = playlist.items()
     if current_items:
-        print(f"[INFO] Clearing existing playlist items: {len(current_items)}")
+        log(f"Clearing {len(current_items)} existing playlist items.")
         playlist.removeItems(current_items)
+        log(
+            f"Cleared {len(current_items)} items in "
+            f"{format_duration(time.monotonic() - stage_started_at)}."
+        )
     else:
-        print("[INFO] Playlist already empty.")
+        log("Playlist is already empty.")
 except Exception as e:
     print(f"[ERROR] Failed to clear existing playlist items: {e}", file=sys.stderr)
     sys.exit(6)
@@ -202,26 +240,64 @@ if not episode_order:
 
 items_to_add = []
 failed_fetch = 0
-for rk in episode_order:
+fetch_started_at = time.monotonic()
+total_episodes = len(episode_order)
+progress_interval = 25
+log(f"Fetching {total_episodes} episodes from Plex; progress reports every {progress_interval} items.")
+for index, rk in enumerate(episode_order, start=1):
+    item_started_at = time.monotonic()
     try:
         items_to_add.append(plex.fetchItem(rk))
     except Exception as e:
         failed_fetch += 1
         print(f"[WARN] Could not fetch episode ratingKey={rk}: {e}", file=sys.stderr)
 
-print(f"[INFO] Fetched {len(items_to_add)} items; {failed_fetch} failed.")
+    item_elapsed = time.monotonic() - item_started_at
+    if item_elapsed >= 5:
+        log(
+            f"Slow episode fetch: ratingKey={rk} took {format_duration(item_elapsed)}.",
+            "WARN",
+        )
+
+    if index % progress_interval == 0 or index == total_episodes:
+        fetch_elapsed = time.monotonic() - fetch_started_at
+        rate = index / fetch_elapsed if fetch_elapsed else 0
+        remaining_seconds = (total_episodes - index) / rate if rate else 0
+        log(
+            f"Fetched {index}/{total_episodes} episodes ({index / total_episodes:.0%}); "
+            f"{rate:.1f} items/s; ETA {format_duration(remaining_seconds)}; "
+            f"failures: {failed_fetch}."
+        )
+
+log(
+    f"Episode fetch complete in {format_duration(time.monotonic() - fetch_started_at)}: "
+    f"{len(items_to_add)} fetched, {failed_fetch} failed."
+)
 
 added_total = 0
 try:
-    for batch in chunked(items_to_add, 500):
+    add_started_at = time.monotonic()
+    batches = list(chunked(items_to_add, 500))
+    log(f"Adding episodes to the playlist in {len(batches)} batch(es).")
+    for batch_number, batch in enumerate(batches, start=1):
         if not batch:
             continue
+        batch_started_at = time.monotonic()
         playlist.addItems(batch)
         added_total += len(batch)
-        print(f"[INFO] Added {len(batch)} items (running total: {added_total})")
+        log(
+            f"Added batch {batch_number}/{len(batches)} ({len(batch)} items) in "
+            f"{format_duration(time.monotonic() - batch_started_at)}; "
+            f"running total: {added_total}/{len(items_to_add)}."
+        )
 except Exception as e:
     print(f"[ERROR] Failed while adding items to playlist '{playlist.title}': {e}", file=sys.stderr)
     sys.exit(7)
 
-print(f"[SUCCESS] Added {added_total} episodes to playlist '{playlist.title}'.")
+log(
+    f"Added {added_total} episodes to playlist '{playlist.title}' in "
+    f"{format_duration(time.monotonic() - add_started_at)}. "
+    f"Total generation time: {format_duration(time.monotonic() - started_at)}.",
+    "SUCCESS",
+)
 sys.exit(0)

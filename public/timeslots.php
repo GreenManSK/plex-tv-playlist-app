@@ -30,6 +30,14 @@ try {
     die("Connection failed: " . htmlspecialchars((string)$e->getMessage(), ENT_QUOTES, 'UTF-8'));
 }
 
+// Safety net for databases created before slotPriority existed.
+foreach (['playlistShows', 'playlistEpisodes'] as $table) {
+    $cols = $conn->query("PRAGMA table_info($table)")->fetchAll(PDO::FETCH_COLUMN, 1);
+    if (!in_array('slotPriority', $cols, true)) {
+        $conn->exec("ALTER TABLE $table ADD COLUMN slotPriority INTEGER DEFAULT 1");
+    }
+}
+
 $shouldRunPipeline = false;
 $error = '';
 
@@ -37,33 +45,60 @@ $error = '';
 if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST['timeslots'])) {
     csrf_validate();
 
-    // Ensure we have an array
-    $timeslots = is_array($_POST['timeslots']) ? $_POST['timeslots'] : [];
-    $uniqueTimeslots = array_unique($timeslots, SORT_REGULAR);
+    // Ensure we have arrays
+    $timeslots  = is_array($_POST['timeslots']) ? $_POST['timeslots'] : [];
+    $priorities = (isset($_POST['priorities']) && is_array($_POST['priorities'])) ? $_POST['priorities'] : [];
 
-    if (count($timeslots) !== count($uniqueTimeslots)) {
-        $error = "Each timeslot must be unique. Please ensure no duplicate timeslots are assigned.";
+    // Shows may share a timeslot, but the (slot, priority) pair must be unique:
+    // within a slot the lower priority plays all its episodes first.
+    $pairs = [];
+    foreach ($timeslots as $showId => $timeslot) {
+        $pairs[] = (int)$timeslot . ':' . (int)($priorities[$showId] ?? 1);
+    }
+
+    if (count($pairs) !== count(array_unique($pairs))) {
+        $error = "Two shows in the same timeslot cannot have the same priority. Give each show in a slot a distinct priority.";
     } else {
         $shouldRunPipeline = true;
+        $sql = "UPDATE playlistShows SET timeSlot = ?, slotPriority = ? WHERE id = ?";
+        $stmt = $conn->prepare($sql);
         foreach ($timeslots as $showId => $timeslot) {
-            $sql = "UPDATE playlistShows SET timeSlot = ? WHERE id = ?";
-            $stmt = $conn->prepare($sql);
-            // Cast safety
-            $stmt->execute([ (int)$timeslot, (int)$showId ]);
+            $stmt->execute([ (int)$timeslot, (int)($priorities[$showId] ?? 1), (int)$showId ]);
         }
     }
 }
 
-// Fetch shows for form
-$sql = "SELECT id, title, timeSlot, total_episodes FROM playlistShows ORDER BY total_episodes ASC";
+// Fetch shows for form, previously assigned ones first and in playback order
+$sql = "SELECT id, title, timeSlot, slotPriority, total_episodes
+        FROM playlistShows
+        ORDER BY (timeSlot IS NULL) ASC, timeSlot ASC, slotPriority ASC, total_episodes ASC";
 $stmt = $conn->query($sql);
 $shows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 $numOfShows = count($shows);
 
+// Keep saved slot/priority; only shows that never got one fall into a free slot.
+$usedPairs = [];
+foreach ($shows as $show) {
+    if (!empty($show['timeSlot'])) {
+        $usedPairs[(int)$show['timeSlot'] . ':' . (int)($show['slotPriority'] ?: 1)] = true;
+    }
+}
 foreach ($shows as $index => $show) {
     if (empty($show['timeSlot'])) {
-        $shows[$index]['timeSlot'] = $index + 1;
+        $slot = 1;
+        while (isset($usedPairs["$slot:1"])) { $slot++; }
+        $usedPairs["$slot:1"] = true;
+        $shows[$index]['timeSlot'] = $slot;
+        $shows[$index]['slotPriority'] = 1;
+    } elseif (empty($show['slotPriority'])) {
+        $shows[$index]['slotPriority'] = 1;
     }
+}
+
+// Dropdowns must always be able to show a cached value, even above the show count
+$maxOption = $numOfShows;
+foreach ($shows as $show) {
+    $maxOption = max($maxOption, (int)$show['timeSlot'], (int)$show['slotPriority']);
 }
 // We won't use $conn after this
 $conn = null;
@@ -133,33 +168,41 @@ require __DIR__ . '/partials/nav.php';
 ?>
 <div class="container py-4">
     <h2 class="mb-3">Assign Timeslots</h2>
+    <p class="text-muted">
+        Shows may share a timeslot. Within a slot, the show with the lower priority plays all of its
+        episodes first, then the next one. Priorities must be unique inside the same slot.
+    </p>
     <?php if (!empty($error)): ?>
         <div class="alert alert-danger"><?= htmlspecialchars((string)$error, ENT_QUOTES, 'UTF-8') ?></div>
     <?php endif; ?>
 
-    <form action="timeslots.php" method="post" onsubmit="return (function(){
-        const els=[...document.querySelectorAll('select[name^=&quot;timeslots&quot;]')];
-        const seen=new Set();
-        for(const el of els){
-            if(seen.has(el.value)){ alert('Each timeslot must be unique.'); return false; }
-            seen.add(el.value);
-        }
-        return true;
-    })();">
+    <form id="timeslot-form" action="timeslots.php" method="post">
         <?= csrf_field() ?>
+        <div class="row fw-bold d-none d-md-flex mb-1">
+            <div class="col-6">Show</div>
+            <div class="col-3">Timeslot</div>
+            <div class="col-3">Priority in slot</div>
+        </div>
         <?php foreach ($shows as $index => $show): ?>
             <div class="row align-items-center mb-2">
-                <div class="col-8">
+                <div class="col-6">
                     <span>
                         <?= htmlspecialchars((string)$show['title'], ENT_QUOTES, 'UTF-8') ?>
                         &mdash; Episodes:
                         <?= htmlspecialchars((string)$show['total_episodes'], ENT_QUOTES, 'UTF-8') ?>
                     </span>
                 </div>
-                <div class="col-4">
+                <div class="col-3">
                     <select class="form-select form-select-sm" name="timeslots[<?= (int)$show['id'] ?>]">
-                        <?php for ($i = 1; $i <= $numOfShows; $i++): ?>
+                        <?php for ($i = 1; $i <= $maxOption; $i++): ?>
                             <option value="<?= $i ?>" <?= ($i === (int)$show['timeSlot']) ? 'selected' : '' ?>><?= $i ?></option>
+                        <?php endfor; ?>
+                    </select>
+                </div>
+                <div class="col-3">
+                    <select class="form-select form-select-sm" name="priorities[<?= (int)$show['id'] ?>]">
+                        <?php for ($i = 1; $i <= $maxOption; $i++): ?>
+                            <option value="<?= $i ?>" <?= ($i === (int)$show['slotPriority']) ? 'selected' : '' ?>><?= $i ?></option>
                         <?php endfor; ?>
                     </select>
                 </div>
@@ -168,4 +211,21 @@ require __DIR__ . '/partials/nav.php';
         <button class="btn btn-success mt-3" type="submit">Generate Playlist</button>
     </form>
 </div>
+<script>
+document.getElementById('timeslot-form').addEventListener('submit', function (e) {
+    const slots = [...this.querySelectorAll('select[name^="timeslots"]')];
+    const seen = new Set();
+    for (const slot of slots) {
+        const showId = slot.name.slice(slot.name.indexOf('[') + 1, -1);
+        const priority = this.querySelector('select[name="priorities[' + showId + ']"]');
+        const pair = slot.value + ':' + (priority ? priority.value : '1');
+        if (seen.has(pair)) {
+            e.preventDefault();
+            alert('Two shows in the same timeslot cannot have the same priority.');
+            return;
+        }
+        seen.add(pair);
+    }
+});
+</script>
 <?php require __DIR__ . '/partials/footer.php'; ?>

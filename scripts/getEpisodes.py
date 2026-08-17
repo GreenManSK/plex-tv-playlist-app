@@ -6,7 +6,7 @@ Usage:
   python getEpisodes.py
 
 Purpose:
-  Reads selected shows (id, timeSlot) from SQLite table `playlistShows`,
+  Reads selected shows (id, timeSlot, slotPriority) from SQLite table `playlistShows`,
   queries Plex for all episodes in those shows, and populates `playlistEpisodes`.
 
 Environment:
@@ -26,6 +26,7 @@ import os
 import sys
 import math
 import sqlite3
+import time
 from urllib.parse import urlparse, urlunparse
 
 import requests
@@ -53,6 +54,23 @@ if not PLEX_URL or not PLEX_TOKEN:
     print("[ERROR] Missing PLEX_URL or PLEX_TOKEN in .env", file=sys.stderr)
     sys.exit(2)
 
+started_at = time.monotonic()
+
+def format_duration(seconds: float) -> str:
+    """Format an elapsed duration for progress messages."""
+    minutes, remaining_seconds = divmod(max(0, int(seconds)), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m {remaining_seconds}s"
+    if minutes:
+        return f"{minutes}m {remaining_seconds}s"
+    return f"{remaining_seconds}s"
+
+def log(message: str, level: str = "INFO") -> None:
+    """Write an immediately visible, timestamped progress message."""
+    elapsed = format_duration(time.monotonic() - started_at)
+    print(f"[{level}] [+{elapsed}] {message}", flush=True)
+
 def remap_localhost_for_container(url: str) -> str:
     """Map localhost/127.0.0.1 to host.docker.internal for container -> host access."""
     try:
@@ -73,11 +91,13 @@ PLEX_URL = remap_localhost_for_container(PLEX_URL)
 # ---------------------------
 # Connect to Plex
 # ---------------------------
+stage_started_at = time.monotonic()
+log(f"Connecting to Plex at {PLEX_URL}.")
 try:
     session = requests.Session()
     session.verify = True if PLEX_VERIFY_SSL else False
     plex = PlexServer(PLEX_URL, PLEX_TOKEN, session=session)
-    print("[INFO] Connected to Plex Server.")
+    log(f"Connected to Plex in {format_duration(time.monotonic() - stage_started_at)}.")
 except Exception as e:
     print(f"[ERROR] Plex connect failed: {e}", file=sys.stderr)
     sys.exit(3)
@@ -88,7 +108,7 @@ except Exception as e:
 try:
     db_conn = sqlite3.connect(DB_FILE)
     cursor = db_conn.cursor()
-    print("[INFO] Connected to SQLite DB.")
+    log("Connected to SQLite DB.")
 except sqlite3.Error as e:
     print(f"[ERROR] SQLite connect failed: {e}", file=sys.stderr)
     sys.exit(1)
@@ -97,7 +117,7 @@ except sqlite3.Error as e:
 try:
     cursor.execute("DELETE FROM playlistEpisodes")
     db_conn.commit()
-    print("[INFO] Cleared playlistEpisodes.")
+    log("Cleared playlistEpisodes.")
 except sqlite3.Error as e:
     print(f"[ERROR] Could not clear playlistEpisodes: {e}", file=sys.stderr)
     cursor.close()
@@ -105,26 +125,38 @@ except sqlite3.Error as e:
     sys.exit(1)
 
 # ---------------------------
-# Fetch selected shows (ratingKey + timeSlot)
+# Fetch selected shows (ratingKey + timeSlot + slotPriority)
 # ---------------------------
-cursor.execute("SELECT id, timeSlot FROM playlistShows")
+cursor.execute("SELECT id, timeSlot, COALESCE(slotPriority, 1) FROM playlistShows")
 rows = cursor.fetchall()
-shows_from_db = {int(rk): ts for rk, ts in rows}
-print(f"[INFO] Selected shows: {len(shows_from_db)}")
+shows_from_db = {int(rk): (ts, int(prio)) for rk, ts, prio in rows}
+log(f"Selected shows: {len(shows_from_db)}.")
 
 # ---------------------------
 # Gather TV libraries (type == 'show')
 # ---------------------------
+stage_started_at = time.monotonic()
+log("Reading Plex library sections.")
 tv_sections = [s for s in plex.library.sections() if getattr(s, 'type', '') == 'show']
+log(
+    f"Found {len(tv_sections)} TV libraries in "
+    f"{format_duration(time.monotonic() - stage_started_at)}."
+)
 if not tv_sections:
     print("[WARN] No TV Show libraries found.")
 
 matched_shows = 0
 total_episodes_processed = 0
 
-for section in tv_sections:
-    print(f"[INFO] Processing TV library: {section.title}")
-    for show in section.all():
+for section_number, section in enumerate(tv_sections, start=1):
+    section_started_at = time.monotonic()
+    log(f"Loading TV library {section_number}/{len(tv_sections)}: '{section.title}'.")
+    library_shows = section.all()
+    log(
+        f"Loaded {len(library_shows)} shows from '{section.title}' in "
+        f"{format_duration(time.monotonic() - section_started_at)}."
+    )
+    for show in library_shows:
         try:
             rk = int(show.ratingKey)
         except Exception:
@@ -134,9 +166,15 @@ for section in tv_sections:
             continue
 
         matched_shows += 1
-        slot = shows_from_db[rk]
+        slot, slot_priority = shows_from_db[rk]
+        show_started_at = time.monotonic()
+        show_title = getattr(show, 'title', f'ratingKey={rk}')
+        log(f"Fetching episodes for selected show {matched_shows}/{len(shows_from_db)}: '{show_title}'.")
+        episodes = show.episodes()
+        show_episode_count = 0
+        log(f"Writing {len(episodes)} episodes for '{show_title}' to the database.")
 
-        for ep in show.episodes():
+        for ep in episodes:
             try:
                 # Duration is stored (rounded up) in minutes
                 duration_ms = getattr(ep, 'duration', 0) or 0
@@ -145,8 +183,8 @@ for section in tv_sections:
                 insert_stmt = ("""
                     INSERT INTO playlistEpisodes
                     (ratingKey, season, episode, releaseDate, duration, summary,
-                     watchedStatus, title, episodeTitle, show_id, timeSlot)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     watchedStatus, title, episodeTitle, show_id, timeSlot, slotPriority)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)
                 data = (
                     int(ep.ratingKey),
@@ -159,15 +197,32 @@ for section in tv_sections:
                     getattr(ep, 'grandparentTitle', '') or '',
                     getattr(ep, 'title', '') or '',
                     rk,
-                    slot
+                    slot,
+                    slot_priority
                 )
                 cursor.execute(insert_stmt, data)
                 db_conn.commit()
                 total_episodes_processed += 1
+                show_episode_count += 1
+                if show_episode_count % 100 == 0:
+                    log(
+                        f"Wrote {show_episode_count}/{len(episodes)} episodes for "
+                        f"'{show_title}'."
+                    )
             except sqlite3.Error as e:
                 print(f"[WARN] Insert failed for episode {getattr(ep, 'title', '<unknown>')}: {e}", file=sys.stderr)
 
-print(f"[SUCCESS] DB update complete. {matched_shows} shows matched. {total_episodes_processed} episodes processed.")
+        log(
+            f"Completed '{show_title}': {show_episode_count}/{len(episodes)} episodes written in "
+            f"{format_duration(time.monotonic() - show_started_at)}."
+        )
+
+log(
+    f"DB update complete. {matched_shows} shows matched and "
+    f"{total_episodes_processed} episodes processed in "
+    f"{format_duration(time.monotonic() - started_at)}.",
+    "SUCCESS",
+)
 
 cursor.close()
 db_conn.close()

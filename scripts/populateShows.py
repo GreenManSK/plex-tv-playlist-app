@@ -93,7 +93,8 @@ CREATE TABLE IF NOT EXISTS playlistShows (
     id INTEGER PRIMARY KEY,
     title TEXT NOT NULL,
     total_episodes INTEGER DEFAULT 0,
-    timeSlot INTEGER
+    timeSlot INTEGER,
+    slotPriority INTEGER DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS playlistEpisodes (
     ratingKey INTEGER PRIMARY KEY,
@@ -106,7 +107,8 @@ CREATE TABLE IF NOT EXISTS playlistEpisodes (
     title TEXT,
     episodeTitle TEXT,
     show_id INTEGER,
-    timeSlot INTEGER
+    timeSlot INTEGER,
+    slotPriority INTEGER DEFAULT 1
 );
 """
 

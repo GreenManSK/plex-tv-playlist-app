@@ -14,16 +14,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['shows'])) {
     csrf_validate();
     try {
         $conn = open_db($dbFilePath);
-        $submittedShows = array_map('intval', (array)$_POST['shows']);
-        $conn->exec("DELETE FROM playlistShows");
-        $stmtInsert = $conn->prepare(
-            "INSERT INTO playlistShows (id, title, total_episodes, timeSlot)
-             SELECT id, title, total_episodes, NULL FROM allShows WHERE id = ?"
+        $submittedShows = array_values(array_unique(array_map('intval', (array)$_POST['shows'])));
+
+        $conn->beginTransaction();
+
+        // Drop de-selected shows only, so slot/priority of the kept ones survives.
+        if ($submittedShows) {
+            $placeholders = implode(',', array_fill(0, count($submittedShows), '?'));
+            $conn->prepare("DELETE FROM playlistShows WHERE id NOT IN ($placeholders)")->execute($submittedShows);
+        } else {
+            $conn->exec("DELETE FROM playlistShows");
+        }
+
+        $stmtUpsert = $conn->prepare(
+            "INSERT INTO playlistShows (id, title, total_episodes, timeSlot, slotPriority)
+             SELECT id, title, total_episodes, NULL, 1 FROM allShows WHERE id = ?
+             ON CONFLICT(id) DO UPDATE SET title = excluded.title, total_episodes = excluded.total_episodes"
         );
-        foreach ($submittedShows as $showId) { $stmtInsert->execute([$showId]); }
+        foreach ($submittedShows as $showId) { $stmtUpsert->execute([$showId]); }
+
+        $conn->commit();
         $conn = null;
         header('Location: timeslots.php'); exit;
     } catch (Throwable $e) {
+        if (isset($conn) && $conn instanceof PDO && $conn->inTransaction()) { $conn->rollBack(); }
         $fatalError = 'Failed to save selection: ' . $e->getMessage();
     }
 }

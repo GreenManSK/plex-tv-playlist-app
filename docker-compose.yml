@@ -7,7 +7,11 @@ services:
     volumes:
       - ./database:/var/www/html/database
       - ./logs:/var/www/html/logs
-      - ./.env:/var/www/html/.env
+      - type: bind
+        source: ./.env
+        target: /var/www/html/.env
+        bind:
+          create_host_path: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
