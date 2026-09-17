@@ -3,12 +3,13 @@
 generatePlaylist.py
 
 Usage:
-  python generatePlaylist.py <playlist_ratingKey>
+  python generatePlaylist.py <playlist_ratingKey> [--skip-watched]
 
 Purpose:
   Clears the specified Plex playlist and re-populates it in a round-robin order
   using episodes stored in SQLite (table: playlistEpisodes), grouped by timeSlot.
   Shows sharing a timeSlot play back-to-back, ordered by slotPriority.
+  With --skip-watched, episodes already watched in Plex are left out.
 
 Environment:
   - .env in project root with:
@@ -85,8 +86,14 @@ PLEX_URL = remap_localhost_for_container(PLEX_URL)
 # ---------------------------
 parser = argparse.ArgumentParser(description="Clear and repopulate a Plex playlist from DB.")
 parser.add_argument("ratingKey", type=int, help="The ratingKey (numeric id) of the target playlist")
+parser.add_argument(
+    "--skip-watched",
+    action="store_true",
+    help="Exclude episodes already marked as watched in Plex",
+)
 args = parser.parse_args()
 playlist_rating_key: int = args.ratingKey
+skip_watched: bool = args.skip_watched
 
 # ---------------------------
 # Helpers
@@ -179,12 +186,16 @@ except Exception as e:
 
 try:
     stage_started_at = time.monotonic()
-    log("Reading episode order from the database.")
+    log(
+        "Reading episode order from the database"
+        + (" (skipping watched episodes)." if skip_watched else ".")
+    )
     query = """
     SELECT ratingKey, timeSlot
     FROM playlistEpisodes
+    {where}
     ORDER BY timeSlot, COALESCE(slotPriority, 1), show_id, season, episode
-    """
+    """.format(where="WHERE COALESCE(watchedStatus, 0) = 0" if skip_watched else "")
     cur.execute(query)
     rows = cur.fetchall()
 finally:

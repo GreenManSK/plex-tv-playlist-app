@@ -41,9 +41,17 @@ foreach (['playlistShows', 'playlistEpisodes'] as $table) {
 $shouldRunPipeline = false;
 $error = '';
 
+$conn->exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+$skipWatched = (string)$conn->query("SELECT value FROM settings WHERE key = 'skip_watched'")->fetchColumn() === '1';
+
 // On POST, update timeslots
 if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST['timeslots'])) {
     csrf_validate();
+
+    $skipWatched = !empty($_POST['skip_watched']);
+    $conn->prepare("INSERT INTO settings(key, value) VALUES('skip_watched', ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+         ->execute([$skipWatched ? '1' : '0']);
 
     // Ensure we have arrays
     $timeslots  = is_array($_POST['timeslots']) ? $_POST['timeslots'] : [];
@@ -138,7 +146,9 @@ if ($shouldRunPipeline) {
 
     if ($ratingKey) {
         // 3) generatePlaylist.py <ratingKey>
-        $r3 = run_with_logging($generatePlaylistScript, [ (string)$ratingKey ], $log_generatePlaylist);
+        $generateArgs = [ (string)$ratingKey ];
+        if ($skipWatched) { $generateArgs[] = '--skip-watched'; }
+        $r3 = run_with_logging($generatePlaylistScript, $generateArgs, $log_generatePlaylist);
         if ($r3['exit_code'] !== 0) {
             require __DIR__ . '/partials/head.php';
             require __DIR__ . '/partials/nav.php';
@@ -208,6 +218,12 @@ require __DIR__ . '/partials/nav.php';
                 </div>
             </div>
         <?php endforeach; ?>
+        <div class="form-check mt-3">
+            <input class="form-check-input" type="checkbox" value="1" id="skip-watched" name="skip_watched" <?= $skipWatched ? 'checked' : '' ?>>
+            <label class="form-check-label" for="skip-watched">
+                Skip episodes already watched in Plex
+            </label>
+        </div>
         <button class="btn btn-success mt-3" type="submit">Generate Playlist</button>
     </form>
 </div>

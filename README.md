@@ -147,7 +147,7 @@ From there you can run:
     python scripts/populateShows.py
     python scripts/getEpisodes.py
     python scripts/newPlaylist.py
-    python scripts/generatePlaylist.py
+    python scripts/generatePlaylist.py <ratingKey> [--skip-watched]
 
 Handy for debugging.
 
