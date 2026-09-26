@@ -3,7 +3,7 @@
 newPlaylist.py
 
 Usage:
-  python newPlaylist.py
+  python newPlaylist.py [--as-user <id-or-username>]
 
 Purpose:
   Creates a new (initially empty) Plex playlist and prints JSON:
@@ -12,6 +12,8 @@ Purpose:
 Notes:
   - Plex requires items at creation time. We seed with one episode, then clear it.
   - generatePlaylist.py will fill the playlist afterward.
+  - Playlists belong to a single Plex account, so the playlist is created as the
+    `watched_user` setting (or --as-user) when one is set.
 
 Environment:
   - .env in project root with:
@@ -26,12 +28,14 @@ Exit codes:
   5 -> No seed episode found
   6 -> Couldn’t fetch seed item
   7 -> Playlist creation failed
+  8 -> Could not switch to the requested Plex user
   0 -> Success
 """
 
 import os
 import sys
 import json
+import argparse
 import sqlite3
 from datetime import datetime
 from typing import Optional
@@ -65,6 +69,14 @@ PLEX_VERIFY_SSL = os.getenv('PLEX_VERIFY_SSL', 'false').strip().lower() in ('1',
 if not PLEX_URL or not PLEX_TOKEN:
     jerr("Missing PLEX_URL or PLEX_TOKEN", 2)
 
+parser = argparse.ArgumentParser(description="Create an empty Plex playlist.")
+parser.add_argument(
+    "--as-user",
+    default=None,
+    help="Plex Home user id/username to own the playlist (overrides the stored setting)",
+)
+args = parser.parse_args()
+
 def remap_localhost_for_container(url: str) -> str:
     """If URL is localhost/127.0.0.1, map to host.docker.internal (useful when Plex runs on the host)."""
     try:
@@ -96,6 +108,7 @@ except Exception as e:
 # Get a seed episode
 # ----------------------
 seed_key: Optional[int] = None
+playlist_user = (args.as_user or '').strip()
 
 if not os.path.exists(DB_PATH):
     jerr(f"DB not found at {DB_PATH}", 4)
@@ -103,6 +116,13 @@ if not os.path.exists(DB_PATH):
 try:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+    if not playlist_user:
+        try:
+            cur.execute("SELECT value FROM settings WHERE key = 'watched_user'")
+            setting_row = cur.fetchone()
+            playlist_user = (setting_row[0] or '').strip() if setting_row else ''
+        except sqlite3.Error:
+            playlist_user = ''
     cur.execute("""
         SELECT ratingKey
         FROM playlistEpisodes
@@ -121,6 +141,17 @@ finally:
         conn.close()
     except Exception:
         pass
+
+# Playlists are per-account, so build it as the user who will watch it.
+if playlist_user:
+    try:
+        plex = plex.switchUser(playlist_user)
+    except Exception as e:
+        jerr(
+            f"Could not switch to Plex user '{playlist_user}': {e}. "
+            "Use the user's Plex Home name; users with a PIN cannot be used.",
+            8,
+        )
 
 # Fallback: ask Plex for any episode if DB is empty
 if seed_key is None:
@@ -160,7 +191,12 @@ try:
         # Not fatal — playlist is created already
         pass
 
-    print(json.dumps({"ok": True, "ratingKey": int(pl.ratingKey), "title": pl.title}))
+    print(json.dumps({
+        "ok": True,
+        "ratingKey": int(pl.ratingKey),
+        "title": pl.title,
+        "user": playlist_user,
+    }))
     sys.exit(0)
 except Exception as e:
     jerr(f"Playlist creation failed: {e}", 7)

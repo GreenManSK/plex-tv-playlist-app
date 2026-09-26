@@ -40,18 +40,51 @@ foreach (['playlistShows', 'playlistEpisodes'] as $table) {
 
 $shouldRunPipeline = false;
 $error = '';
+$notice = '';
 
 $conn->exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
-$skipWatched = (string)$conn->query("SELECT value FROM settings WHERE key = 'skip_watched'")->fetchColumn() === '1';
+
+function setting_get(PDO $conn, string $key): string {
+    $stmt = $conn->prepare("SELECT value FROM settings WHERE key = ?");
+    $stmt->execute([$key]);
+    return (string)($stmt->fetchColumn() ?: '');
+}
+
+function setting_set(PDO $conn, string $key, string $value): void {
+    $conn->prepare("INSERT INTO settings(key, value) VALUES(?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+         ->execute([$key, $value]);
+}
+
+$skipWatched  = setting_get($conn, 'skip_watched') === '1';
+$watchedUser  = setting_get($conn, 'watched_user');
+$plexUsers    = json_decode(setting_get($conn, 'plex_users') ?: '[]', true);
+if (!is_array($plexUsers)) { $plexUsers = []; }
+
+// Refresh the cached list of Plex Home users
+if ($_SERVER["REQUEST_METHOD"] === "POST" && ($_POST['action'] ?? '') === 'refresh_users') {
+    csrf_validate();
+
+    $r = run_py_logged('listUsers.py', [], "$logDir/listUsers_$timestamp.log");
+    $j = json_decode((string)$r['stdout'], true);
+    if ($r['exit_code'] === 0 && is_array($j) && !empty($j['ok']) && is_array($j['users'] ?? null)) {
+        $plexUsers = $j['users'];
+        setting_set($conn, 'plex_users', json_encode($plexUsers));
+        $notice = 'Loaded ' . count($plexUsers) . ' Plex user(s).';
+    } else {
+        $error = 'Could not load Plex users: ' . (is_array($j) ? ($j['error'] ?? 'unknown error') : 'unexpected output');
+    }
+}
 
 // On POST, update timeslots
 if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST['timeslots'])) {
     csrf_validate();
 
     $skipWatched = !empty($_POST['skip_watched']);
-    $conn->prepare("INSERT INTO settings(key, value) VALUES('skip_watched', ?)
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-         ->execute([$skipWatched ? '1' : '0']);
+    setting_set($conn, 'skip_watched', $skipWatched ? '1' : '0');
+
+    $watchedUser = trim((string)($_POST['watched_user'] ?? ''));
+    setting_set($conn, 'watched_user', $watchedUser);
 
     // Ensure we have arrays
     $timeslots  = is_array($_POST['timeslots']) ? $_POST['timeslots'] : [];
@@ -185,6 +218,14 @@ require __DIR__ . '/partials/nav.php';
     <?php if (!empty($error)): ?>
         <div class="alert alert-danger"><?= htmlspecialchars((string)$error, ENT_QUOTES, 'UTF-8') ?></div>
     <?php endif; ?>
+    <?php if (!empty($notice)): ?>
+        <div class="alert alert-success"><?= htmlspecialchars((string)$notice, ENT_QUOTES, 'UTF-8') ?></div>
+    <?php endif; ?>
+
+    <form id="refresh-users-form" action="timeslots.php" method="post">
+        <?= csrf_field() ?>
+        <input type="hidden" name="action" value="refresh_users">
+    </form>
 
     <form id="timeslot-form" action="timeslots.php" method="post">
         <?= csrf_field() ?>
@@ -223,6 +264,27 @@ require __DIR__ . '/partials/nav.php';
             <label class="form-check-label" for="skip-watched">
                 Skip episodes already watched in Plex
             </label>
+        </div>
+        <div class="row align-items-end mt-3">
+            <div class="col-12 col-md-6">
+                <label class="form-label mb-1" for="watched-user">Build playlist for</label>
+                <select class="form-select form-select-sm" id="watched-user" name="watched_user">
+                    <option value="">Server owner (default)</option>
+                    <?php foreach ($plexUsers as $u):
+                        if (!empty($u['owner'])) { continue; }
+                        $uid = (string)($u['user'] ?? $u['title'] ?? '');
+                        if ($uid === '') { continue; }
+                    ?>
+                        <option value="<?= htmlspecialchars($uid, ENT_QUOTES, 'UTF-8') ?>" <?= ($uid === $watchedUser) ? 'selected' : '' ?>>
+                            <?= htmlspecialchars((string)($u['title'] ?? $uid), ENT_QUOTES, 'UTF-8') ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+                <div class="form-text">The playlist is created in this user's account and uses their watched history. Only Plex Home users without a PIN can be used.</div>
+            </div>
+            <div class="col-12 col-md-auto mt-2 mt-md-0">
+                <button class="btn btn-outline-secondary btn-sm" type="submit" form="refresh-users-form">Refresh user list</button>
+            </div>
         </div>
         <button class="btn btn-success mt-3" type="submit">Generate Playlist</button>
     </form>

@@ -8,18 +8,18 @@ This runs entirely in **Docker** and includes a web UI, Python logic, and a guid
 
 ## ⚡ TL;DR (Quick Start if you already have Docker)
 
-1) Download the app (clone or ZIP), open a terminal in the project folder, then:
+1. Download the app (clone or ZIP), open a terminal in the project folder, then:
 
-    cp .env.example .env
-    docker compose up -d
+   cp .env.example .env
+   docker compose up -d
 
    On Windows PowerShell, use `Copy-Item .env.example .env` instead.
 
-2) Open your browser at:
+2. Open your browser at:
 
-    http://localhost:8080
+   http://localhost:8080
 
-3) Click **Setup** → **Sign in with Plex** → choose your server → **Save** → **Initialize / Refresh TV Shows** → pick shows → assign timeslots → **Generate Playlist**.
+3. Click **Setup** → **Sign in with Plex** → choose your server → **Save** → **Initialize / Refresh TV Shows** → pick shows → assign timeslots → **Generate Playlist**.
 
 ---
 
@@ -28,22 +28,24 @@ This runs entirely in **Docker** and includes a web UI, Python logic, and a guid
 You only have to do this once.
 
 ### Windows or macOS
-1. Download Docker Desktop:  https://www.docker.com/products/docker-desktop/
+
+1. Download Docker Desktop: https://www.docker.com/products/docker-desktop/
 2. Install and launch it once so it finalizes setup.
 3. Verify in a terminal:
 
-       docker --version
-       docker compose version
+   docker --version
+   docker compose version
 
 If either command fails, restart your computer and try again.
 
 ### Linux
-1. Install Docker Engine:  https://docs.docker.com/engine/install/
-2. Install Docker Compose plugin:  https://docs.docker.com/compose/install/linux/
+
+1. Install Docker Engine: https://docs.docker.com/engine/install/
+2. Install Docker Compose plugin: https://docs.docker.com/compose/install/linux/
 3. Verify:
 
-       docker --version
-       docker compose version
+   docker --version
+   docker compose version
 
 ---
 
@@ -52,6 +54,7 @@ If either command fails, restart your computer and try again.
 Choose one:
 
 **A) Download ZIP (easiest, no Git required)**
+
 - Go to the GitHub repo page.
 - Click **Code** → **Download ZIP**.
 - Unzip it somewhere easy (e.g., your Desktop).
@@ -83,15 +86,15 @@ You’ll see the web UI.
 
 ## 🧭 First‑Run Setup (in the Web UI)
 
-1) Go to **Setup**.
-2) Click **Sign in with Plex** (PIN flow).
+1. Go to **Setup**.
+2. Click **Sign in with Plex** (PIN flow).
    - A Plex page opens — approve access.
    - The app auto-detects your **Plex servers** and shows them in a list.
-3) Select your server and click **Save to .env**.
+3. Select your server and click **Save to .env**.
    - The app tests connectivity and writes `PLEX_URL`, `PLEX_TOKEN`, and `PLEX_VERIFY_SSL` for you.
-4) Click **Initialize / Refresh TV Shows** to sync your TV libraries.
-5) Go to **Edit Shows** and select the shows you want included.
-6) Go to **Timeslots**, assign each show a slot (1..N) and a priority within that slot, and click **Generate Playlist**.
+4. Click **Initialize / Refresh TV Shows** to sync your TV libraries.
+5. Go to **Edit Shows** and select the shows you want included.
+6. Go to **Timeslots**, assign each show a slot (1..N) and a priority within that slot, and click **Generate Playlist**.
    - The app creates (or clears) the target playlist and fills it in round‑robin order.
    - Multiple shows may share a slot: the one with the lower priority plays all of its episodes first, then the next.
 
@@ -128,6 +131,7 @@ That’s it. Open Plex → Playlists to see it.
     │   ├── getEpisodes.py          # Pull episodes for selected shows
     │   ├── newPlaylist.py          # Create/clear target playlist
     │   ├── generatePlaylist.py     # Build round‑robin order & add items
+    │   ├── listUsers.py            # List Plex Home users for watched status
     │   └── plex_debug_dump.py      # Deep-dive debug tool (URL/token checks)
     ├── database/                   # SQLite DB lives here
     ├── logs/                       # Script and auth logs
@@ -149,15 +153,21 @@ From there you can run:
     python scripts/newPlaylist.py
     python scripts/generatePlaylist.py <ratingKey> [--skip-watched]
 
+By default everything runs as the server owner. Pick a Plex Home user on the
+Timeslots page to both read that user's watched history and create the playlist
+inside their account (otherwise they can't see it). Manually, pass
+`--watched-user <id-or-username>` to `getEpisodes.py` and `--as-user <id-or-username>`
+to `newPlaylist.py` and `generatePlaylist.py`.
+
 Handy for debugging.
 
 ---
 
 ## 🗃️ Data & Logs on Your Host
 
-- Database:  `./database/plex_playlist.db`
-- Logs:      `./logs/*.log`
-- Config:    `./.env` (auto-written by the setup wizard)
+- Database: `./database/plex_playlist.db`
+- Logs: `./logs/*.log`
+- Config: `./.env` (auto-written by the setup wizard)
 
 These paths are mounted into the container, so they persist across updates.
 
@@ -171,10 +181,11 @@ If you cloned with Git:
     docker compose up -d --build
 
 If you used a ZIP:
+
 - Download the new ZIP and replace the files (keep your `database/` and `logs/` folders).
 - Then run:
 
-    docker compose up -d --build
+  docker compose up -d --build
 
 ---
 
@@ -190,15 +201,18 @@ If you used a ZIP:
 ## 🛠 Troubleshooting
 
 **Can’t find/connect to Plex?**
+
 - Make sure Plex is running and reachable on your network.
 - Use the **Plex Sign-In** in the Setup page (it auto-discovers your servers).
 - If your Plex uses a self‑signed cert, uncheck “Verify SSL” in the wizard when saving.
 
 **Playlist didn’t fill?**
+
 - Ensure you selected shows and assigned timeslots before generating. Shows sharing a slot need **distinct** priorities.
 - Re-run **Initialize / Refresh TV Shows** if you recently added libraries.
 
 **Advanced: token/URL mismatches**
+
 - Use the debug tool (inside the container):
 
       python scripts/plex_debug_dump.py --url "YOUR_PLEX_URL" --token "YOUR_TOKEN" --verify true
@@ -227,6 +241,7 @@ Schema created on first run:
 You can run this anywhere that supports Docker. Two common approaches on Unraid:
 
 **A) Using Docker Compose (recommended)**
+
 - SSH into your Unraid box (or use the Compose Manager plugin).
 - Place the project folder somewhere persistent (e.g., `/mnt/user/appdata/plex-tv-playlist-app`).
 - From that folder:
@@ -236,6 +251,7 @@ You can run this anywhere that supports Docker. Two common approaches on Unraid:
 - Access on your LAN: `http://<unraid-ip>:8080`
 
 **B) Using plain Docker commands**
+
 - Build the image:
 
       docker build -t plex-tv-playlist-app .
@@ -262,6 +278,7 @@ You can run this anywhere that supports Docker. Two common approaches on Unraid:
 ## 🤝 Contributing
 
 PRs welcome! Please:
+
 - Keep `.env.example` current.
 - Don’t commit real tokens or `.env`.
 - Follow the log style: `[INFO]`, `[WARN]`, `[SUCCESS]`, `[ERROR]`.

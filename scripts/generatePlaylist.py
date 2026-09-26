@@ -3,13 +3,15 @@
 generatePlaylist.py
 
 Usage:
-  python generatePlaylist.py <playlist_ratingKey> [--skip-watched]
+  python generatePlaylist.py <playlist_ratingKey> [--skip-watched] [--as-user <id-or-username>]
 
 Purpose:
   Clears the specified Plex playlist and re-populates it in a round-robin order
   using episodes stored in SQLite (table: playlistEpisodes), grouped by timeSlot.
   Shows sharing a timeSlot play back-to-back, ordered by slotPriority.
   With --skip-watched, episodes already watched in Plex are left out.
+  Playlists belong to a single Plex account, so the work is done as the
+  `watched_user` setting (or --as-user) when one is set.
 
 Environment:
   - .env in project root with:
@@ -91,9 +93,15 @@ parser.add_argument(
     action="store_true",
     help="Exclude episodes already marked as watched in Plex",
 )
+parser.add_argument(
+    "--as-user",
+    default=None,
+    help="Plex Home user id/username that owns the playlist (overrides the stored setting)",
+)
 args = parser.parse_args()
 playlist_rating_key: int = args.ratingKey
 skip_watched: bool = args.skip_watched
+playlist_user: str = (args.as_user or '').strip()
 
 # ---------------------------
 # Helpers
@@ -152,6 +160,35 @@ except Exception as e:
 log(f"Connected to Plex in {format_duration(time.monotonic() - stage_started_at)}.")
 
 # ---------------------------
+# Work as the account that owns the playlist
+# ---------------------------
+if not playlist_user and os.path.exists(DB_PATH):
+    settings_conn = None
+    try:
+        settings_conn = sqlite3.connect(DB_PATH)
+        setting_row = settings_conn.execute(
+            "SELECT value FROM settings WHERE key = 'watched_user'"
+        ).fetchone()
+        playlist_user = (setting_row[0] or '').strip() if setting_row else ''
+    except sqlite3.Error:
+        playlist_user = ''
+    finally:
+        if settings_conn is not None:
+            settings_conn.close()
+
+if playlist_user:
+    try:
+        plex = plex.switchUser(playlist_user)
+        log(f"Building the playlist as Plex user '{playlist_user}'.")
+    except Exception as e:
+        print(
+            f"[ERROR] Could not switch to Plex user '{playlist_user}': {e}. "
+            "Use the user's Plex Home name; users with a PIN cannot be used.",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+
+# ---------------------------
 # Fetch playlist by ratingKey
 # ---------------------------
 try:
@@ -194,7 +231,9 @@ try:
     SELECT ratingKey, timeSlot
     FROM playlistEpisodes
     {where}
-    ORDER BY timeSlot, COALESCE(slotPriority, 1), show_id, season, episode
+    ORDER BY timeSlot, COALESCE(slotPriority, 1), show_id,
+             CASE WHEN COALESCE(season, 0) = 0 THEN 1 ELSE 0 END,
+             season, episode
     """.format(where="WHERE COALESCE(watchedStatus, 0) = 0" if skip_watched else "")
     cur.execute(query)
     rows = cur.fetchall()

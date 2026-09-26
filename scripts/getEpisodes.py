@@ -8,6 +8,8 @@ Usage:
 Purpose:
   Reads selected shows (id, timeSlot, slotPriority) from SQLite table `playlistShows`,
   queries Plex for all episodes in those shows, and populates `playlistEpisodes`.
+  Watched status is read for the owner account unless the `watched_user` setting
+  (or --watched-user) names a Plex Home user to read it as.
 
 Environment:
   - .env in project root with:
@@ -19,6 +21,7 @@ Exit codes:
   1 -> SQLite error / write failure
   2 -> Missing PLEX_URL or PLEX_TOKEN
   3 -> Plex connection failed
+  4 -> Could not switch to the requested Plex user
   0 -> Success
 """
 
@@ -27,6 +30,7 @@ import sys
 import math
 import sqlite3
 import time
+import argparse
 from urllib.parse import urlparse, urlunparse
 
 import requests
@@ -53,6 +57,14 @@ PLEX_VERIFY_SSL = os.getenv('PLEX_VERIFY_SSL', 'false').strip().lower() in ('1',
 if not PLEX_URL or not PLEX_TOKEN:
     print("[ERROR] Missing PLEX_URL or PLEX_TOKEN in .env", file=sys.stderr)
     sys.exit(2)
+
+parser = argparse.ArgumentParser(description="Populate playlistEpisodes from Plex.")
+parser.add_argument(
+    "--watched-user",
+    default=None,
+    help="Plex Home user id/username to read watched status as (overrides the stored setting)",
+)
+args = parser.parse_args()
 
 started_at = time.monotonic()
 
@@ -113,6 +125,33 @@ except sqlite3.Error as e:
     print(f"[ERROR] SQLite connect failed: {e}", file=sys.stderr)
     sys.exit(1)
 
+# ---------------------------
+# Resolve which account's watched status to record
+# ---------------------------
+watched_user = (args.watched_user or '').strip()
+if not watched_user:
+    try:
+        cursor.execute("SELECT value FROM settings WHERE key = 'watched_user'")
+        row = cursor.fetchone()
+        watched_user = (row[0] or '').strip() if row else ''
+    except sqlite3.Error:
+        watched_user = ''
+
+watched_plex = plex
+if watched_user:
+    try:
+        watched_plex = plex.switchUser(watched_user)
+        log(f"Reading watched status as Plex user '{watched_user}'.")
+    except Exception as e:
+        print(
+            f"[ERROR] Could not switch to Plex user '{watched_user}': {e}. "
+            "Use the user's Plex Home name, and note that users with a PIN cannot be used.",
+            file=sys.stderr,
+        )
+        cursor.close()
+        db_conn.close()
+        sys.exit(4)
+
 # Clear the table before refilling
 try:
     cursor.execute("DELETE FROM playlistEpisodes")
@@ -171,6 +210,22 @@ for section_number, section in enumerate(tv_sections, start=1):
         show_title = getattr(show, 'title', f'ratingKey={rk}')
         log(f"Fetching episodes for selected show {matched_shows}/{len(shows_from_db)}: '{show_title}'.")
         episodes = show.episodes()
+
+        watched_keys = set()
+        if watched_plex is not plex:
+            try:
+                watched_keys = {
+                    int(e.ratingKey)
+                    for e in watched_plex.fetchItem(rk).episodes()
+                    if getattr(e, 'viewCount', 0)
+                }
+            except Exception as e:
+                print(
+                    f"[WARN] Could not read watched status for '{show_title}' as "
+                    f"user '{watched_user}': {e}",
+                    file=sys.stderr,
+                )
+
         show_episode_count = 0
         log(f"Writing {len(episodes)} episodes for '{show_title}' to the database.")
 
@@ -179,6 +234,11 @@ for section_number, section in enumerate(tv_sections, start=1):
                 # Duration is stored (rounded up) in minutes
                 duration_ms = getattr(ep, 'duration', 0) or 0
                 duration_minutes = math.ceil(duration_ms / 60000) if duration_ms else 0
+
+                if watched_plex is not plex:
+                    watched = int(ep.ratingKey) in watched_keys
+                else:
+                    watched = bool(getattr(ep, 'viewCount', 0))
 
                 insert_stmt = ("""
                     INSERT INTO playlistEpisodes
@@ -193,7 +253,7 @@ for section_number, section in enumerate(tv_sections, start=1):
                     getattr(ep, 'originallyAvailableAt', None),
                     duration_minutes,
                     getattr(ep, 'summary', None),
-                    bool(getattr(ep, 'viewCount', 0)),
+                    watched,
                     getattr(ep, 'grandparentTitle', '') or '',
                     getattr(ep, 'title', '') or '',
                     rk,
