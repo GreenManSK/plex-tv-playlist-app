@@ -3,7 +3,7 @@ services:
     build: .
     container_name: plex-playlist
     ports:
-      - "8080:80"
+      - "${APP_PORT:-8080}:80"
     volumes:
       - ./database:/var/www/html/database
       - ./logs:/var/www/html/logs

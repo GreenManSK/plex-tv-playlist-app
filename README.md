@@ -80,6 +80,8 @@ This builds and starts a single container. When it’s ready, open:
 
     http://localhost:8080
 
+To use a different host port, set `APP_PORT` in `.env` before running `docker compose up -d`, then open `http://localhost:<APP_PORT>`. Run `docker compose up -d` again after changing the port.
+
 You’ll see the web UI.
 
 ---
